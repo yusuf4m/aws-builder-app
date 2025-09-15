@@ -93,8 +93,18 @@ typings/
 .vscode-test
 
 # Logs
-logs
+logs/
 *.log
+combined.log
+error.log
+access.log
+
+# Credential files
+*credentials*
+*secret*
+*token*
+test-*-credentials.js
+test-*-flow.js
 
 # OS generated files
 .DS_Store
