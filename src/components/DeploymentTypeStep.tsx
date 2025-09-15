@@ -14,6 +14,13 @@ interface DeploymentTypeStepProps {
     url: string
     branch: string
     dockerImage?: string
+    ecrImageUri?: string
+    ecrConfig?: {
+      repositoryName: string
+      imageTag: string
+      accountId?: string
+      region?: string
+    }
   }
 }
 
@@ -254,7 +261,7 @@ export default function DeploymentTypeStep({ onComplete, onBack, initialData, re
               min="1"
               max="10"
               value={config.replicas}
-              onChange={(e) => handleConfigChange('replicas', parseInt(e.target.value))}
+              onChange={(e) => handleConfigChange('replicas', parseInt(e.target.value) || 1)}
               className="input-field"
             />
           </div>
@@ -268,7 +275,7 @@ export default function DeploymentTypeStep({ onComplete, onBack, initialData, re
               min="1"
               max="65535"
               value={config.port}
-              onChange={(e) => handleConfigChange('port', parseInt(e.target.value))}
+              onChange={(e) => handleConfigChange('port', parseInt(e.target.value) || (selectedType === 'backend' ? 8000 : 3000))}
               className="input-field"
             />
           </div>

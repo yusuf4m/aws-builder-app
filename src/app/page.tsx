@@ -5,6 +5,7 @@ import { ChevronRightIcon, CheckIcon } from '@heroicons/react/24/outline'
 import AWSCredentialsStep from '../components/AWSCredentialsStep'
 import RepositoryStep from '../components/RepositoryStep'
 import DeploymentTypeStep from '../components/DeploymentTypeStep'
+import DeploymentConfigStep, { TerraformConfig } from '../components/DeploymentConfigStep'
 import DeploymentProgressStep from '../components/DeploymentProgressStep'
 
 type Step = {
@@ -24,10 +25,19 @@ type DeploymentData = {
     url: string
     branch: string
     dockerImage?: string
+    name?: string
   }
   deploymentType?: 'backend' | 'frontend'
   environment?: 'dev' | 'staging' | 'prod'
   deploymentConfig?: any
+  terraformConfig?: TerraformConfig
+}
+
+// Helper function to extract repository name from URL
+const extractRepoName = (url: string): string => {
+  if (!url) return ''
+  const match = url.match(/\/([^/]+?)(\.git)?$/)
+  return match ? match[1] : ''
 }
 
 export default function Home() {
@@ -55,9 +65,15 @@ export default function Home() {
     },
     {
       id: 4,
+      name: 'Infrastructure Config',
+      description: 'Configure VPC, EKS, database, SSL, and monitoring settings',
+      status: currentStep === 4 ? 'current' : currentStep > 4 ? 'completed' : 'pending'
+    },
+    {
+      id: 5,
       name: 'Deploy',
       description: 'Execute deployment and monitor progress',
-      status: currentStep === 4 ? 'current' : currentStep > 4 ? 'completed' : 'pending'
+      status: currentStep === 5 ? 'current' : currentStep > 5 ? 'completed' : 'pending'
     }
   ]
 
@@ -68,6 +84,17 @@ export default function Home() {
 
   const handleStepBack = () => {
     setCurrentStep(prev => Math.max(1, prev - 1))
+  }
+
+  const handleTerminateDeployment = () => {
+    // Reset to the infrastructure config step to allow user to reconfigure
+    setCurrentStep(4)
+    // Optionally clear deployment data to force reconfiguration
+    setDeploymentData(prev => ({
+      ...prev,
+      deploymentConfig: undefined,
+      terraformConfig: undefined
+    }))
   }
 
   const renderCurrentStep = () => {
@@ -102,8 +129,23 @@ export default function Home() {
         )
       case 4:
         return (
+          <DeploymentConfigStep
+            onComplete={(terraformConfig) => handleStepComplete({ terraformConfig })}
+            onBack={handleStepBack}
+            environment={deploymentData.environment || 'dev'}
+            repository={{
+              url: deploymentData.repository?.url || '',
+              branch: deploymentData.repository?.branch || 'main',
+              name: deploymentData.repository?.name || extractRepoName(deploymentData.repository?.url || '')
+            }}
+            initialConfig={deploymentData.terraformConfig}
+          />
+        )
+      case 5:
+        return (
           <DeploymentProgressStep
             onBack={handleStepBack}
+            onTerminate={handleTerminateDeployment}
             deploymentData={deploymentData}
           />
         )

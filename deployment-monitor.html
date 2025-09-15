@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deployment Monitor</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-weight: bold;
+            text-transform: uppercase;
+            font-size: 12px;
+        }
+        .status.running { background-color: #fef3c7; color: #92400e; }
+        .status.completed { background-color: #d1fae5; color: #065f46; }
+        .status.failed { background-color: #fee2e2; color: #991b1b; }
+        .status.pending { background-color: #e5e7eb; color: #374151; }
+        .logs {
+            background-color: #1f2937;
+            color: #f9fafb;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .refresh-btn {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 20px;
+        }
+        .refresh-btn:hover {
+            background-color: #2563eb;
+        }
+        .deployment-item {
+            border-left: 4px solid #e5e7eb;
+            padding-left: 15px;
+            margin-bottom: 15px;
+        }
+        .deployment-item.running {
+            border-left-color: #f59e0b;
+        }
+        .deployment-item.completed {
+            border-left-color: #10b981;
+        }
+        .deployment-item.failed {
+            border-left-color: #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Deployment Monitor</h1>
+        
+        <button class="refresh-btn" onclick="refreshDeployments()">Refresh Deployments</button>
+        
+        <div class="card">
+            <h2>Active Deployments</h2>
+            <div id="deployments-list">
+                <p>Loading deployments...</p>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Real-time Logs</h2>
+            <div id="real-time-logs" class="logs">
+                Connecting to deployment service...
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Test Deployment</h2>
+            <p>Start a test deployment to see the logging system in action:</p>
+            <button class="refresh-btn" onclick="startTestDeployment()">Start Test Deployment</button>
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        
+        // Initialize Socket.IO connection
+        function initSocket() {
+            socket = io('http://localhost:3001');
+            
+            socket.on('connect', () => {
+                addLog('Connected to deployment service');
+            });
+            
+            socket.on('disconnect', () => {
+                addLog('Disconnected from deployment service');
+            });
+            
+            socket.on('deployment-log', (data) => {
+                addLog(`[${data.deploymentId}] ${data.message}`);
+            });
+            
+            socket.on('build-progress', (data) => {
+                addLog(`[BUILD ${data.deploymentId}] ${data.message}`);
+            });
+            
+            socket.on('step-update', (data) => {
+                addLog(`[STEP ${data.deploymentId}] ${data.stepId}: ${data.status}`);
+            });
+            
+            socket.on('terraform-output', (data) => {
+                addLog(`[TERRAFORM ${data.deploymentId}] ${data.command}: ${data.data}`);
+            });
+        }
+        
+        function addLog(message) {
+            const logsDiv = document.getElementById('real-time-logs');
+            const timestamp = new Date().toLocaleTimeString();
+            logsDiv.textContent += `[${timestamp}] ${message}\n`;
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+        
+        async function refreshDeployments() {
+            try {
+                const response = await fetch('http://localhost:3001/api/deployment/active');
+                const data = await response.json();
+                
+                const deploymentsDiv = document.getElementById('deployments-list');
+                
+                if (data.deployments.length === 0) {
+                    deploymentsDiv.innerHTML = '<p>No active deployments</p>';
+                } else {
+                    deploymentsDiv.innerHTML = data.deployments.map(deployment => `
+                        <div class="deployment-item ${deployment.status}">
+                            <h3>Deployment ${deployment.id.substring(0, 8)}</h3>
+                            <p><strong>Type:</strong> ${deployment.type}</p>
+                            <p><strong>Status:</strong> <span class="status ${deployment.status}">${deployment.status}</span></p>
+                            <p><strong>Current Step:</strong> ${deployment.currentStep || 'N/A'}</p>
+                            <p><strong>Started:</strong> ${new Date(deployment.startTime).toLocaleString()}</p>
+                            ${deployment.error ? `<p><strong>Error:</strong> ${deployment.error}</p>` : ''}
+                            <button class="refresh-btn" onclick="viewLogs('${deployment.id}')">View Logs</button>
+                        </div>
+                    `).join('');
+                }
+            } catch (error) {
+                document.getElementById('deployments-list').innerHTML = `<p>Error loading deployments: ${error.message}</p>`;
+            }
+        }
+        
+        async function viewLogs(deploymentId) {
+            try {
+                const response = await fetch(`http://localhost:3001/api/deployment/logs/${deploymentId}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    const logsWindow = window.open('', '_blank', 'width=800,height=600');
+                    logsWindow.document.write(`
+                        <html>
+                            <head><title>Deployment Logs - ${deploymentId}</title></head>
+                            <body style="font-family: monospace; padding: 20px; background: #1f2937; color: #f9fafb;">
+                                <h2>Deployment Logs - ${deploymentId}</h2>
+                                <pre>${data.logs.map(log => `[${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}`).join('\n')}</pre>
+                            </body>
+                        </html>
+                    `);
+                }
+            } catch (error) {
+                alert(`Error loading logs: ${error.message}`);
+            }
+        }
+        
+        async function startTestDeployment() {
+            try {
+                const response = await fetch('http://localhost:3001/api/deployment/start', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        awsCredentials: {
+                            accessKeyId: 'test-key',
+                            secretAccessKey: 'test-secret',
+                            region: 'us-west-2'
+                        },
+                        repository: {
+                            url: 'https://github.com/test/test-repo.git',
+                            branch: 'main',
+                            owner: 'test',
+                            name: 'test-repo'
+                        },
+                        deploymentType: 'eks',
+                        environment: 'dev',
+                        deploymentConfig: {
+                            projectName: 'test-app',
+                            environment: 'dev',
+                            deploymentType: 'eks'
+                        }
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    addLog(`Started test deployment: ${result.deploymentId}`);
+                    socket.emit('join-deployment', result.deploymentId);
+                    setTimeout(refreshDeployments, 1000);
+                } else {
+                    addLog(`Failed to start test deployment: ${result.message}`);
+                }
+            } catch (error) {
+                addLog(`Error starting test deployment: ${error.message}`);
+            }
+        }
+        
+        // Initialize on page load
+        window.onload = function() {
+            initSocket();
+            refreshDeployments();
+            
+            // Auto-refresh deployments every 10 seconds
+            setInterval(refreshDeployments, 10000);
+        };
+    </script>
+</body>
+</html>

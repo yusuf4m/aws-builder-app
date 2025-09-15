@@ -115,17 +115,54 @@ const dockerBuildSchema = Joi.object({
 const dockerBuildRequestSchema = Joi.object({
   url: Joi.string().uri().required(),
   branch: Joi.string().required().min(1).max(100),
-  accessToken: Joi.string().optional().allow('')
+  accessToken: Joi.string().optional().allow(''),
+  imageName: Joi.string().optional().min(1).max(100).pattern(/^[a-z0-9-]+$/),
+  imageTag: Joi.string().optional().default('latest').pattern(/^[a-zA-Z0-9._-]+$/),
+  awsCredentials: Joi.object({
+    accessKey: Joi.string().optional(),
+    secretKey: Joi.string().optional(),
+    region: Joi.string().optional(),
+    accountId: Joi.string().optional()
+  }).optional()
 });
 
 // ECR push request schema
-const ecrPushSchema = Joi.object({
-  imageName: Joi.string().required().pattern(/^[a-z0-9-\/]+$/),
+const ecrPushRequestSchema = Joi.object({
+  imageName: Joi.string().required(),
   imageTag: Joi.string().default('latest').pattern(/^[a-zA-Z0-9._-]+$/),
-  ecrRegistry: Joi.string().required().pattern(/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$/),
+  repositoryName: Joi.string().required().pattern(/^[a-z0-9-\/]+$/),
+  awsCredentials: Joi.object({
+    accessKeyId: Joi.string().optional(),
+    secretAccessKey: Joi.string().optional(),
+    accessKey: Joi.string().optional(),
+    secretKey: Joi.string().optional(),
+    region: Joi.string().required(),
+    accountId: Joi.string().optional()
+  }).required()
+});
+
+// Deployment-specific ECR push schema (for internal deployment process)
+const deploymentECRPushSchema = Joi.object({
+  imageName: Joi.string().required(),
+  imageTag: Joi.string().default('latest').pattern(/^[a-zA-Z0-9._-]+$/),
+  ecrRegistry: Joi.string().required(),
   ecrRepository: Joi.string().required().pattern(/^[a-z0-9-\/]+$/),
   ecrAuthToken: Joi.string().required(),
-  awsCredentials: awsCredentialsSchema.required()
+  awsCredentials: Joi.object({
+    accessKeyId: Joi.string().required(),
+    secretAccessKey: Joi.string().required(),
+    region: Joi.string().required()
+  }).required()
+});
+
+// ECR repository creation schema
+const ecrRepositorySchema = Joi.object({
+  repositoryName: Joi.string().required().min(2).max(256).pattern(/^[a-z0-9-\/]+$/),
+  awsCredentials: Joi.object({
+    accessKeyId: Joi.string().required(),
+    secretAccessKey: Joi.string().required(),
+    region: Joi.string().required()
+  }).required()
 });
 
 // Terraform operation schema
@@ -195,7 +232,9 @@ const validateRepository = createValidationMiddleware(repositorySchema);
 const validateDeploymentConfig = createValidationMiddleware(deploymentConfigSchema);
 const validateDeploymentRequest = createValidationMiddleware(deploymentRequestSchema);
 const validateDockerBuild = createValidationMiddleware(dockerBuildSchema);
-const validateECRPush = createValidationMiddleware(ecrPushSchema);
+const validateECRPushRequest = createValidationMiddleware(ecrPushRequestSchema);
+const validateDeploymentECRPush = createValidationMiddleware(deploymentECRPushSchema);
+const validateECRRepository = createValidationMiddleware(ecrRepositorySchema);
 const validateTerraformOperation = createValidationMiddleware(terraformOperationSchema);
 const validateGitHubRepo = createValidationMiddleware(githubRepoSchema);
 const validateGitHubRequest = createValidationMiddleware(githubRequestSchema);
@@ -284,35 +323,38 @@ const paginationSchema = Joi.object({
 
 // Export validation middlewares
 module.exports = {
-  // Schema definitions
+  // Schemas
   awsCredentialsSchema,
   repositorySchema,
   deploymentConfigSchema,
   deploymentRequestSchema,
   dockerBuildSchema,
-  ecrPushSchema,
+  ecrPushRequestSchema,
+  ecrRepositorySchema,
   terraformOperationSchema,
   githubRepoSchema,
   deploymentIdSchema,
   paginationSchema,
-  
-  // Validation middleware factory
+
+  // Middleware functions
   createValidationMiddleware,
-  
-  // Specific validation middlewares
+
+  // Validation middleware
   validateAWSCredentials,
   validateRepository,
   validateDeploymentConfig,
   validateDeploymentRequest,
   validateDockerBuild,
-  validateECRPush,
+  validateECRPushRequest,
+  validateDeploymentECRPush,
+  validateECRRepository,
   validateTerraformOperation,
   validateTerraformRequest: validateTerraformOperation, // Alias for Terraform routes
   validateGitHubRepo,
   validateGitHubRequest,
   validateDockerBuildRequest,
-  
-  // Generic validation middlewares
+
+  // Parameter and query validation
   validateParams,
   validateQuery
 };

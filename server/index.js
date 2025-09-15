@@ -11,6 +11,7 @@ const githubRoutes = require('./routes/github');
 const terraformRoutes = require('./routes/terraform');
 const deploymentRoutes = require('./routes/deployment');
 const dockerRoutes = require('./routes/docker');
+const ecrRoutes = require('./routes/ecr');
 const { errorHandler } = require('./middleware/errorHandler');
 const { logger } = require('./utils/logger');
 
@@ -50,12 +51,13 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API Routes
+// Routes
 app.use('/api/aws', awsRoutes);
 app.use('/api/github', githubRoutes);
 app.use('/api/terraform', terraformRoutes);
 app.use('/api/deployment', deploymentRoutes);
 app.use('/api/docker', dockerRoutes);
+app.use('/api/ecr', ecrRoutes);
 
 // WebSocket connection handling
 io.on('connection', (socket) => {

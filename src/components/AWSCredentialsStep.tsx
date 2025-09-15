@@ -9,7 +9,8 @@ import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
 const awsCredentialsSchema = z.object({
   accessKey: z.string().min(16, 'Access Key must be at least 16 characters'),
   secretKey: z.string().min(32, 'Secret Key must be at least 32 characters'),
-  region: z.string().min(1, 'Region is required')
+  region: z.string().min(1, 'Region is required'),
+  accountId: z.string().optional()
 })
 
 type AWSCredentialsForm = z.infer<typeof awsCredentialsSchema>
@@ -96,10 +97,15 @@ export default function AWSCredentialsStep({ onComplete, initialData }: AWSCrede
           awsCredentials: {
             accessKey: trimmedData.accessKey,
             secretKey: trimmedData.secretKey,
-            region: trimmedData.region
+            region: trimmedData.region,
+            accountId: result.account
           },
           isValid: true,
-          accountInfo: result.accountInfo
+          accountInfo: {
+            account: result.account,
+            userId: result.userId,
+            arn: result.arn
+          }
         })
       } else {
         // Display the specific error message from the backend

@@ -40,7 +40,7 @@ function parseGitHubUrl(url) {
 // Build Docker image from GitHub repository
 router.post('/build', validateDockerBuildRequest, async (req, res) => {
   try {
-    const { url, branch = 'main', accessToken } = req.body;
+    const { url, branch = 'main', accessToken, imageName: customImageName, imageTag: customImageTag } = req.body;
     
     if (!url) {
       return res.status(400).json({
@@ -60,9 +60,12 @@ router.post('/build', validateDockerBuildRequest, async (req, res) => {
     }
     
     const buildId = uuidv4();
-    const imageName = `${parsed.owner}-${parsed.repo}`.toLowerCase();
-    const imageTag = 'latest';
+    // Use custom image name if provided, otherwise generate from repo info
+    const imageName = customImageName || `${parsed.owner}-${parsed.repo}`.toLowerCase();
+    const imageTag = customImageTag || 'latest';
     const fullImageName = `${imageName}:${imageTag}`;
+    
+
     
     logger.info(`Starting Docker build for ${repositoryUrl} (${branch})`);
     
@@ -76,6 +79,21 @@ router.post('/build', validateDockerBuildRequest, async (req, res) => {
       startTime: new Date(),
       logs: []
     });
+    
+    // Emit initial status via WebSocket
+    const io = req.io;
+    const emitLog = (message, level = 'info') => {
+      const logEntry = {
+        timestamp: new Date(),
+        message,
+        level,
+        buildId
+      };
+      activeBuilds.get(buildId).logs.push(logEntry);
+      io.emit('docker-build-log', logEntry);
+    };
+    
+    emitLog(`Starting Docker build for ${repositoryUrl} (${branch})`, 'info');
     
     // Create temporary directory
     const tmpDir = tmp.dirSync({ unsafeCleanup: true });
@@ -97,11 +115,7 @@ router.post('/build', validateDockerBuildRequest, async (req, res) => {
       
       // Update build status
       activeBuilds.get(buildId).status = 'building';
-      activeBuilds.get(buildId).logs.push({
-        timestamp: new Date(),
-        message: `Repository cloned successfully from ${repositoryUrl}`,
-        level: 'info'
-      });
+      emitLog(`Repository cloned successfully from ${repositoryUrl}`, 'info');
       
       // Check if Dockerfile exists
       const dockerfilePath = path.join(clonePath, 'Dockerfile');
@@ -121,13 +135,14 @@ router.post('/build', validateDockerBuildRequest, async (req, res) => {
       );
       
       // Build image
-      const buildStream = await docker.buildImage(tarStream, {
+      const buildOptions = {
         t: fullImageName,
         dockerfile: 'Dockerfile',
         rm: true, // Remove intermediate containers
         forcerm: true, // Always remove intermediate containers
         pull: true // Always pull base image
-      });
+      };
+      const buildStream = await docker.buildImage(tarStream, buildOptions);
       
       // Handle build stream
       const buildPromise = new Promise((resolve, reject) => {
@@ -171,9 +186,33 @@ router.post('/build', validateDockerBuildRequest, async (req, res) => {
       // Wait for build to complete
       await buildPromise;
       
+      // Check if our image exists, if not try to find the most recent dangling image
+      let targetImage;
+      try {
+        targetImage = docker.getImage(fullImageName);
+        await targetImage.inspect();
+      } catch (error) {
+        // Find the most recent dangling image (likely our build result)
+        const images = await docker.listImages();
+        const danglingImages = images.filter(img => 
+          !img.RepoTags || img.RepoTags.length === 0 || img.RepoTags[0] === '<none>:<none>'
+        ).sort((a, b) => b.Created - a.Created);
+        
+        if (danglingImages.length > 0) {
+          const mostRecentDangling = danglingImages[0];
+          
+          // Tag the dangling image with our desired name
+          const danglingImage = docker.getImage(mostRecentDangling.Id);
+          await danglingImage.tag({ repo: imageName, tag: imageTag });
+          
+          targetImage = docker.getImage(fullImageName);
+        } else {
+          throw new Error(`No image found with name ${fullImageName} and no dangling images available`);
+        }
+      }
+      
       // Get image info
-      const image = docker.getImage(fullImageName);
-      const imageInfo = await image.inspect();
+      const imageInfo = await targetImage.inspect();
       
       // Cleanup temporary directory
       tmpDir.removeCallback();

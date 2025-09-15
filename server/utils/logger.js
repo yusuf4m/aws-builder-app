@@ -50,7 +50,14 @@ const logger = winston.createLogger({
       format: winston.format.combine(
         winston.format.timestamp(),
         winston.format.printf(({ timestamp, level, message, deploymentId, ...meta }) => {
-          const metaStr = Object.keys(meta).length ? JSON.stringify(meta) : '';
+          const metaStr = Object.keys(meta).length ? JSON.stringify(meta, (key, value) => {
+            if (typeof value === 'object' && value !== null) {
+              if (value.constructor && (value.constructor.name === 'ClientRequest' || value.constructor.name === 'IncomingMessage')) {
+                return '[Circular]';
+              }
+            }
+            return value;
+          }) : '';
           const deploymentStr = deploymentId ? `[${deploymentId}]` : '';
           return `${timestamp} [${level.toUpperCase()}] ${deploymentStr} ${message} ${metaStr}`;
         })
@@ -68,7 +75,14 @@ if (process.env.NODE_ENV !== 'production') {
         format: 'HH:mm:ss'
       }),
       winston.format.printf(({ timestamp, level, message, deploymentId, ...meta }) => {
-        const metaStr = Object.keys(meta).length ? JSON.stringify(meta, null, 2) : '';
+        const metaStr = Object.keys(meta).length ? JSON.stringify(meta, (key, value) => {
+          if (typeof value === 'object' && value !== null) {
+            if (value.constructor && (value.constructor.name === 'ClientRequest' || value.constructor.name === 'IncomingMessage')) {
+              return '[Circular]';
+            }
+          }
+          return value;
+        }) : '';
         const deploymentStr = deploymentId ? `[${deploymentId}]` : '';
         return `${timestamp} ${level} ${deploymentStr} ${message} ${metaStr}`;
       })

@@ -1,28 +1,54 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { ArrowLeftIcon, CodeBracketIcon } from '@heroicons/react/24/outline'
+import { io, Socket } from 'socket.io-client'
 
 const repositorySchema = z.object({
   url: z.string().url('Please enter a valid repository URL'),
   branch: z.string().min(1, 'Branch is required'),
-  accessToken: z.string().optional()
+  accessToken: z.string().optional(),
+  pushToECR: z.boolean().default(false),
+  ecrRepositoryName: z.string().optional(),
+  imageTag: z.string().default('latest'),
+  ecrImageUri: z.string().optional()
 })
 
 type RepositoryForm = z.infer<typeof repositorySchema>
 
 interface RepositoryStepProps {
-  onComplete: (data: { repository: RepositoryForm & { dockerImage?: string }; [key: string]: any }) => void
+  onComplete: (data: { 
+    repository: RepositoryForm & { 
+      dockerImage?: string; 
+      name?: string; 
+      ecrImageUri?: string;
+      ecrConfig?: {
+        repositoryName: string;
+        imageTag: string;
+        accountId?: string;
+        region?: string;
+      }
+    }; 
+    [key: string]: any 
+  }) => void
   onBack: () => void
-  initialData?: RepositoryForm & { dockerImage?: string }
+  initialData?: RepositoryForm & { dockerImage?: string; name?: string; ecrImageUri?: string }
   awsCredentials?: {
     accessKey: string
     secretKey: string
     region: string
+    accountId?: string
   }
+}
+
+// Helper function to extract repository name from URL
+const extractRepoName = (url: string): string => {
+  if (!url) return ''
+  const match = url.match(/\/([^/]+?)(\.git)?$/)
+  return match ? match[1] : ''
 }
 
 export default function RepositoryStep({ onComplete, onBack, initialData, awsCredentials }: RepositoryStepProps) {
@@ -34,6 +60,9 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
   const [isValidatingToken, setIsValidatingToken] = useState(false)
   const [tokenValidationError, setTokenValidationError] = useState('')
   const [isTokenValidated, setIsTokenValidated] = useState(false)
+  const [realTimeLogs, setRealTimeLogs] = useState<Array<{timestamp: Date, message: string, level: string, buildId?: string, operationId?: string}>>([])
+  const [showLogs, setShowLogs] = useState(false)
+  const socketRef = useRef<Socket | null>(null)
 
   const {
     register,
@@ -46,12 +75,45 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
     defaultValues: initialData || {
       url: '',
       branch: 'main',
-      accessToken: ''
+      accessToken: '',
+      pushToECR: false,
+      ecrRepositoryName: '',
+      imageTag: 'latest'
     },
     mode: 'onChange'
   })
 
   const watchedUrl = watch('url')
+
+  // WebSocket setup
+  useEffect(() => {
+    // Initialize socket connection
+    socketRef.current = io('http://localhost:3001')
+    
+    // Listen for Docker build logs
+    socketRef.current.on('docker-build-log', (logEntry: any) => {
+      setRealTimeLogs(prev => [...prev, {
+        ...logEntry,
+        timestamp: new Date(logEntry.timestamp)
+      }])
+      setShowLogs(true)
+    })
+    
+    // Listen for ECR push logs
+    socketRef.current.on('ecr-log', (logEntry: any) => {
+      setRealTimeLogs(prev => [...prev, {
+        ...logEntry,
+        timestamp: new Date(logEntry.timestamp)
+      }])
+      setShowLogs(true)
+    })
+    
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect()
+      }
+    }
+  }, [])
 
   const validateTokenAndFetchBranches = async (repoUrl: string, accessToken: string) => {
     if (!repoUrl) return
@@ -124,12 +186,18 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
   const buildDockerImage = async (data: RepositoryForm) => {
     setIsBuildingImage(true)
     setBuildProgress('Starting build process...')
+    setRealTimeLogs([]) // Clear previous logs
+    setShowLogs(false)
     
     const steps = [
       { step: 'validate', status: 'pending' as const, message: 'Validating repository access' },
       { step: 'clone', status: 'pending' as const, message: 'Cloning repository' },
       { step: 'dockerfile', status: 'pending' as const, message: 'Checking Dockerfile' },
       { step: 'build', status: 'pending' as const, message: 'Building Docker image' },
+      ...(data.pushToECR ? [
+        { step: 'ecr-create', status: 'pending' as const, message: 'Creating ECR repository' },
+        { step: 'ecr-push', status: 'pending' as const, message: 'Pushing image to ECR' }
+      ] : []),
       { step: 'complete', status: 'pending' as const, message: 'Finalizing build' }
     ]
     setBuildSteps(steps)
@@ -164,6 +232,10 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
       setBuildSteps(prev => prev.map(s => ['clone', 'dockerfile', 'build'].includes(s.step) ? {...s, status: 'active'} : s))
       setBuildProgress('Building Docker image from repository...')
       
+      // Generate the expected image name format (same as backend)
+      const repoName = extractRepoName(data.url)
+      const expectedImageName = `${repoName}:${data.imageTag || 'latest'}`
+      
       const buildResponse = await fetch('http://localhost:3001/api/docker/build', {
         method: 'POST',
         headers: {
@@ -173,6 +245,8 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
           url: data.url,
           branch: data.branch,
           accessToken: data.accessToken,
+          imageName: repoName,
+          imageTag: data.imageTag || 'latest',
           awsCredentials
         }),
       })
@@ -189,16 +263,98 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
         ['clone', 'dockerfile', 'build'].includes(s.step) ? {...s, status: 'completed'} : s
       ))
       
-      // Step 5: Complete
+      let ecrImageUri = ''
+      
+      // ECR Push Steps (if enabled)
+      if (data.pushToECR && awsCredentials) {
+        const repositoryName = data.ecrRepositoryName || extractRepoName(data.url)
+        const imageTag = data.imageTag || 'latest'
+        
+        // Step: Create ECR Repository
+        setBuildSteps(prev => prev.map(s => s.step === 'ecr-create' ? {...s, status: 'active'} : s))
+        setBuildProgress('Creating ECR repository...')
+        
+        const createRepoResponse = await fetch('http://localhost:3001/api/ecr/create-repository', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            repositoryName,
+            awsCredentials: {
+              accessKeyId: awsCredentials.accessKey,
+              secretAccessKey: awsCredentials.secretKey,
+              region: awsCredentials.region
+            }
+          }),
+        })
+        
+        const createRepoResult = await createRepoResponse.json()
+        
+        if (!createRepoResult.success) {
+          setBuildSteps(prev => prev.map(s => s.step === 'ecr-create' ? {...s, status: 'error', message: createRepoResult.message} : s))
+          throw new Error(createRepoResult.message || 'ECR repository creation failed')
+        }
+        
+        setBuildSteps(prev => prev.map(s => s.step === 'ecr-create' ? {...s, status: 'completed'} : s))
+        
+        // Step: Push to ECR
+        setBuildSteps(prev => prev.map(s => s.step === 'ecr-push' ? {...s, status: 'active'} : s))
+        setBuildProgress('Pushing image to ECR...')
+        
+        const pushResponse = await fetch('http://localhost:3001/api/ecr/push-image', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            imageName: expectedImageName,
+            repositoryName,
+            imageTag,
+            awsCredentials: {
+              accessKeyId: awsCredentials.accessKey,
+              secretAccessKey: awsCredentials.secretKey,
+              region: awsCredentials.region,
+              accountId: awsCredentials.accountId
+            }
+          }),
+        })
+        
+        const pushResult = await pushResponse.json()
+        
+        if (!pushResult.success) {
+          setBuildSteps(prev => prev.map(s => s.step === 'ecr-push' ? {...s, status: 'error', message: pushResult.message} : s))
+          throw new Error(pushResult.message || 'ECR push failed')
+        }
+        
+        setBuildSteps(prev => prev.map(s => s.step === 'ecr-push' ? {...s, status: 'completed'} : s))
+        ecrImageUri = pushResult.imageUri
+      }
+      
+      // Step: Complete
       setBuildSteps(prev => prev.map(s => s.step === 'complete' ? {...s, status: 'active'} : s))
-      setBuildProgress('Docker image built successfully!')
+      setBuildProgress(data.pushToECR ? 'Image built and pushed to ECR successfully!' : 'Docker image built successfully!')
       
       setTimeout(() => {
         setBuildSteps(prev => prev.map(s => s.step === 'complete' ? {...s, status: 'completed'} : s))
+        
+        const repositoryName = data.ecrRepositoryName || extractRepoName(data.url)
+        const imageTag = data.imageTag || 'latest'
+        
         onComplete({
           repository: {
             ...data,
-            dockerImage: buildResult.image?.name || buildResult.image?.id
+            dockerImage: buildResult.image?.name || buildResult.image?.id,
+            name: extractRepoName(data.url),
+            ...(ecrImageUri && { ecrImageUri }),
+            ...(data.pushToECR && awsCredentials && {
+              ecrConfig: {
+                repositoryName,
+                imageTag,
+                accountId: awsCredentials.accountId,
+                region: awsCredentials.region
+              }
+            })
           }
         })
       }, 1000)
@@ -366,6 +522,68 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
           )}
         </div>
 
+        {/* ECR Push Configuration */}
+        {awsCredentials && (
+          <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+            <div className="flex items-center mb-4">
+              <input
+                {...register('pushToECR')}
+                type="checkbox"
+                id="pushToECR"
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+              />
+              <label htmlFor="pushToECR" className="ml-2 block text-sm font-medium text-gray-700">
+                Push image to Amazon ECR
+              </label>
+            </div>
+            <p className="text-sm text-gray-600 mb-4">
+              Automatically create an ECR repository and push the built Docker image for easy deployment.
+            </p>
+            
+            {watch('pushToECR') && (
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="ecrRepositoryName" className="block text-sm font-medium text-gray-700 mb-2">
+                    ECR Repository Name (Optional)
+                  </label>
+                  <input
+                    {...register('ecrRepositoryName')}
+                    type="text"
+                    id="ecrRepositoryName"
+                    className="input-field"
+                    placeholder={`Auto-generated: ${extractRepoName(watchedUrl || '')}`}
+                  />
+                  <p className="mt-1 text-sm text-gray-500">
+                    Leave empty to use the repository name from the Git URL.
+                  </p>
+                  {errors.ecrRepositoryName && (
+                    <p className="mt-1 text-sm text-error-600">{errors.ecrRepositoryName.message}</p>
+                  )}
+                </div>
+                
+                <div>
+                  <label htmlFor="imageTag" className="block text-sm font-medium text-gray-700 mb-2">
+                    Image Tag
+                  </label>
+                  <input
+                    {...register('imageTag')}
+                    type="text"
+                    id="imageTag"
+                    className="input-field"
+                    placeholder="latest"
+                  />
+                  <p className="mt-1 text-sm text-gray-500">
+                    Tag for the Docker image in ECR (e.g., latest, v1.0.0, dev).
+                  </p>
+                  {errors.imageTag && (
+                    <p className="mt-1 text-sm text-error-600">{errors.imageTag.message}</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {isBuildingImage && (
           <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-6">
             <div className="mb-4">
@@ -434,6 +652,36 @@ export default function RepositoryStep({ onComplete, onBack, initialData, awsCre
                       </div>
                     )}
                   </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Real-time Logs Display */}
+        {showLogs && realTimeLogs.length > 0 && (
+          <div className="bg-gray-900 rounded-lg p-4 mt-6">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-white font-semibold text-sm">Real-time Build & Push Logs</h3>
+              <button
+                type="button"
+                onClick={() => setShowLogs(false)}
+                className="text-gray-400 hover:text-white text-sm"
+              >
+                Hide Logs
+              </button>
+            </div>
+            <div className="bg-black rounded p-3 max-h-64 overflow-y-auto font-mono text-xs">
+              {realTimeLogs.map((log, index) => (
+                <div key={index} className={`mb-1 ${
+                  log.level === 'error' ? 'text-red-400' :
+                  log.level === 'success' ? 'text-green-400' :
+                  'text-gray-300'
+                }`}>
+                  <span className="text-gray-500">
+                    [{log.timestamp.toLocaleTimeString()}]
+                  </span>
+                  <span className="ml-2">{log.message}</span>
                 </div>
               ))}
             </div>
